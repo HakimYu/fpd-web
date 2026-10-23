@@ -11,7 +11,7 @@ bunx lmfpd@latest -b https://aihub.dog/v1 -k sk-123 -m gpt-6.1-sol
 ## 启动
 
 ```sh
-cd model-test
+cd fpd-web
 bun server.ts          # 或 bun dev（热重载）
 # → http://127.0.0.1:5273
 ```
