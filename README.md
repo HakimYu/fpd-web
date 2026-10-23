@@ -16,6 +16,14 @@ bun server.ts          # 或 bun dev（热重载）
 # → http://127.0.0.1:5273
 ```
 
+想要 https 和本地域名，用 [portless](https://portless.sh)：
+
+```sh
+bun run dev:https      # → https://fpd-web.localhost
+```
+
+首次运行会问一次 sudo，把本地 CA 装进系统信任库；之后浏览器绿锁直开。代理自动把随机端口通过 `PORT` 传给应用，`.localhost` 域名由系统自带解析，不用改 hosts。
+
 第一次打开时先在「供应商」一栏点「新增」，填一组 base url 和 api key。
 
 | 环境变量 | 默认 | 说明 |

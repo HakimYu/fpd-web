@@ -367,14 +367,23 @@ function json(data: any, status = 200) {
   });
 }
 
+// 本机名：localhost 及其子域（portless 用 fpd-web.localhost）、回环地址
+function isLocalHost(name: string) {
+  const h = name.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "::1" || h === "::ffff:127.0.0.1";
+}
+
 function checkLocal(req: Request) {
-  const host = (req.headers.get("host") ?? "").split(":")[0].replace(/^\[|\]$/g, "");
-  if (!["localhost", "127.0.0.1", "::1"].includes(host)) return false;
+  // 连接必须真的来自本机：portless 的代理绑 443 并可能监听所有网卡，只校验 Host 会被同网段伪造绕过
+  const peer = server.requestIP(req)?.address;
+  if (peer && !isLocalHost(peer)) return false;
+  const raw = req.headers.get("host") ?? "";
+  const host = raw.startsWith("[") ? raw.slice(0, raw.indexOf("]") + 1) : raw.split(":")[0];
+  if (!isLocalHost(host)) return false;
   const origin = req.headers.get("origin");
   if (origin) {
     try {
-      const u = new URL(origin);
-      if (!["localhost", "127.0.0.1", "[::1]"].includes(u.hostname)) return false;
+      if (!isLocalHost(new URL(origin).hostname)) return false;
     } catch {
       return false;
     }
