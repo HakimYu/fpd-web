@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fpd · 模型指纹检测</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧬</text></svg>" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">🧬</span>
+        <div>
+          <h1>模型指纹检测</h1>
+          <p class="sub">lmfpd 图形界面 · 判断 API 背后的模型是不是它自称的那个</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span class="pill" id="spec">—</span>
+        <span class="dot" id="health" title="本地服务状态"></span>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="aside-head">
+          <h2>供应商</h2>
+          <button class="btn btn-ghost btn-sm" id="add-provider">＋ 新增</button>
+        </div>
+        <ul class="provider-list" id="provider-list"></ul>
+        <p class="hint" id="provider-empty">还没有供应商。先添加一组 <code>base url</code> + <code>api key</code>。</p>
+      </aside>
+
+      <main class="main">
+        <section class="card" id="test-panel">
+          <div class="card-head">
+            <h2>发起检测</h2>
+            <span class="pill pill-muted" id="panel-provider">未选择供应商</span>
+          </div>
+
+          <div class="form-row">
+            <label for="model">模型名</label>
+            <div class="input-group">
+              <input id="model" list="model-list" placeholder="输入模型名，如 gpt-6.1-sol" autocomplete="off" />
+              <datalist id="model-list"></datalist>
+              <button class="btn btn-ghost" id="fetch-models" title="向供应商请求 /models">拉取模型</button>
+            </div>
+          </div>
+
+          <div class="chips" id="model-chips"></div>
+
+          <details class="advanced">
+            <summary>高级选项</summary>
+            <div class="adv-grid">
+              <label>协议 / API
+                <select id="opt-api">
+                  <option value="responses">responses 默认</option>
+                  <option value="chatcompletion">chatcompletion</option>
+                  <option value="message">message</option>
+                </select>
+              </label>
+              <label>样本数 count
+                <select id="opt-count">
+                  <option value="3" selected>3 · 有置信度</option>
+                  <option value="2">2 · 只排名</option>
+                  <option value="1">1 · 只排名</option>
+                </select>
+              </label>
+              <label>并发 parallel
+                <select id="opt-parallel">
+                  <option value="3" selected>3</option>
+                  <option value="2">2</option>
+                  <option value="1">1</option>
+                </select>
+              </label>
+              <label>轮数 repeat
+                <input id="opt-repeat" type="number" min="1" max="20" value="1" />
+              </label>
+              <label>超时 timeout（秒）
+                <input id="opt-timeout" type="number" min="5" max="1800" value="120" />
+              </label>
+              <label>推理强度 effort
+                <input id="opt-effort" placeholder="留空 / low / medium / high" autocomplete="off" />
+              </label>
+              <label>服务档 service tier
+                <select id="opt-tier">
+                  <option value="default">default</option>
+                  <option value="flex">flex / slow</option>
+                  <option value="fast">fast</option>
+                  <option value="ultrafast">ultrafast</option>
+                </select>
+              </label>
+              <label>终端宽度 cols
+                <select id="opt-cols">
+                  <option value="80">80</option>
+                  <option value="100">100</option>
+                  <option value="110" selected>110</option>
+                  <option value="130">130</option>
+                  <option value="160">160</option>
+                </select>
+              </label>
+              <div class="adv-checks">
+                <label class="check"><input type="checkbox" id="opt-strict" /> strict（强制 count=3 完整回答）</label>
+                <label class="check"><input type="checkbox" id="opt-nostream" /> no-stream（用 JSON 而非 SSE）</label>
+                <label class="check"><input type="checkbox" id="opt-tokenizer" /> tokenizer 探针（多约 12 个请求）</label>
+                <label class="check sub-check"><span>max-probes</span><input id="opt-maxprobes" type="number" min="4" max="60" value="20" /></label>
+              </div>
+            </div>
+          </details>
+
+          <div class="actions">
+            <button class="btn btn-primary" id="run-btn" disabled>开始检测</button>
+            <button class="btn btn-danger" id="cancel-btn" hidden>取消</button>
+            <button class="btn btn-ghost" id="copy-cmd" title="复制等效命令行">复制等效命令</button>
+          </div>
+          <code class="cmdline" id="cmdline"></code>
+        </section>
+
+        <section id="result-section" hidden>
+          <div class="card" id="result-card"></div>
+        </section>
+
+        <section class="card" id="history-card">
+          <div class="card-head">
+            <h2>历史记录</h2>
+            <span class="pill pill-muted" id="history-count">0</span>
+          </div>
+          <div class="history" id="history"></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="provider-dialog">
+      <form method="dialog" class="dialog-body" id="provider-form">
+        <h2 id="dialog-title">新增供应商</h2>
+        <label>名称
+          <input id="pv-name" placeholder="留空则用域名" autocomplete="off" />
+        </label>
+        <label>Base URL
+          <input id="pv-baseurl" placeholder="https://aihub.dog/v1" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>API Key
+          <input id="pv-apikey" type="password" placeholder="sk-..." autocomplete="off" />
+          <small id="pv-keyhint"></small>
+        </label>
+        <p class="hint">Key 只存在本机 <code>data/providers.json</code>（权限 600），接口只回遮罩值，检测时通过环境变量注入，不会出现在命令行里。</p>
+        <div class="dialog-actions">
+          <button class="btn btn-ghost" value="cancel" type="button" id="pv-cancel">取消</button>
+          <button class="btn btn-primary" type="submit" id="pv-save">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

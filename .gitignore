@@ -1,0 +1,5 @@
+# 密钥与运行记录，绝不入库
+data/
+runs/
+node_modules/
+.DS_Store
