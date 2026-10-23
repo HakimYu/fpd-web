@@ -1,14 +1,17 @@
 {
   "name": "fpd-web",
   "version": "1.0.0",
-  "private": true,
+  "devDependencies": {
+    "@types/bun": "^1.4.4"
+  },
   "description": "lmfpd 的本地图形界面：供应商 → 模型 → 检测 → 结果",
-  "type": "module",
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "private": true,
   "scripts": {
     "dev": "bun --watch server.ts",
     "start": "bun server.ts"
   },
-  "engines": {
-    "bun": ">=1.4.2"
-  }
+  "type": "module"
 }

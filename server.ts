@@ -142,7 +142,7 @@ async function fetchProviderModels(p: Provider): Promise<string[]> {
     throw new Error(`${res.status} ${res.statusText} — ${url}${body ? ` — ${body}` : ""}`);
   }
   const json: any = await res.json();
-  const list = Array.isArray(json) ? json : (json?.data ?? json?.models ?? []);
+  const list: any[] = Array.isArray(json) ? json : (json?.data ?? json?.models ?? []);
   const ids = list
     .map((m: any) => (typeof m === "string" ? m : (m?.id ?? m?.name ?? m?.model)))
     .filter((v: any): v is string => typeof v === "string" && v.length > 0);
