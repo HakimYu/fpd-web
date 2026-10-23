@@ -1,4 +1,4 @@
-/* fpd-web 前端 —— 零依赖。核心是那台小终端：吃 lmfpd 的 ANSI 输出，回放成带高亮的画面。 */
+/* 模型指纹检测 —— 前端。零依赖，核心是那台小终端：吃 lmfpd 的 ANSI 输出，回放成带高亮的画面。 */
 
 const $ = (id) => document.getElementById(id);
 
@@ -33,7 +33,15 @@ const S = {
   loadedRunId: null,
 };
 
-/* ================================================================ 小终端 */
+const STATUS_TEXT = {
+  queued: "排队中",
+  running: "检测中",
+  done: "已完成",
+  error: "失败",
+  cancelled: "已取消",
+};
+
+/* ================================================================ 终端 */
 
 const SGR_COLORS = {
   30: 30, 31: 31, 32: 32, 33: 33, 34: 34, 35: 35, 36: 36, 37: 37,
@@ -79,7 +87,7 @@ class Term {
       return Number.isFinite(v) ? v : def;
     };
 
-    if (paramStr.startsWith("?")) return; // 私有模式(?25l/h、?2026h/l)一律忽略
+    if (paramStr.startsWith("?")) return; // 私有模式（?25l/h、?2026h/l）一律忽略
 
     switch (final) {
       case "A": this.row = Math.max(0, this.row - n(0)); break;
@@ -127,11 +135,14 @@ class Term {
       const code = parseInt(params[i], 10);
       if (!Number.isFinite(code)) continue;
       if (code === 0) {
-        this.fg = null; this.bg = null; this.flags.clear();
+        this.fg = null;
+        this.bg = null;
+        this.flags.clear();
       } else if (code === 1 || code === 2 || code === 3 || code === 4 || code === 7 || code === 9) {
         this.flags.add({ 1: "bold", 2: "dim", 3: "italic", 4: "underline", 7: "inverse", 9: "strike" }[code]);
       } else if (code === 22) {
-        this.flags.delete("bold"); this.flags.delete("dim");
+        this.flags.delete("bold");
+        this.flags.delete("dim");
       } else if (code === 23) this.flags.delete("italic");
       else if (code === 24) this.flags.delete("underline");
       else if (code === 27) this.flags.delete("inverse");
@@ -141,7 +152,6 @@ class Term {
       else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) this.bg = code;
       else if (code === 49) this.bg = null;
       else if (code === 38 || code === 48) {
-        // 256 色 / truecolor：吃掉后续参数，退化成默认色
         if (params[i + 1] === "5") i += 2;
         else if (params[i + 1] === "2") i += 4;
       }
@@ -158,7 +168,6 @@ class Term {
       if (ch === "\x1b") {
         const next = data[i + 1];
         if (next === "]") {
-          // OSC（含超链接）：跳到 BEL 或 ESC \
           const bel = data.indexOf("\x07", i);
           const st = data.indexOf("\x1b\\", i);
           let end = -1;
@@ -244,9 +253,9 @@ function paint(host, term) {
     let i = 0;
     while (i < end) {
       const cell = line[i] ?? { ch: " ", cls: "" };
+      const cls = cell.cls ?? "";
       let j = i;
       let text = "";
-      const cls = cell.cls ?? "";
       while (j < end && (line[j]?.cls ?? "") === cls) {
         text += line[j]?.ch ?? " ";
         j++;
@@ -271,8 +280,6 @@ function schedulePaint() {
     S.raf = 0;
     paint($("term-body"), S.term);
   });
-  const el = $("term-elapsed");
-  if (el) el.textContent = elapsedText(S.run);
 }
 
 /* ================================================================ 工具 */
@@ -319,13 +326,20 @@ const fmtDur = (ms) => {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 };
 
+function durationOf(run) {
+  if (!run) return "—";
+  const start = run.startedAt ?? run.createdAt;
+  if (!start) return "—";
+  return fmtDur((run.finishedAt ?? Date.now()) - start);
+}
+
 function toast(msg, kind = "info") {
   const t = el("div", { class: `toast toast-${kind}`, text: msg });
   document.body.append(t);
-  requestAnimationFrame(() => t.classList.add("show"));
+  requestAnimationFrame(() => t.classList.add("is-on"));
   setTimeout(() => {
-    t.classList.remove("show");
-    setTimeout(() => t.remove(), 300);
+    t.classList.remove("is-on");
+    setTimeout(() => t.remove(), 240);
   }, 3200);
 }
 
@@ -346,23 +360,26 @@ async function refresh() {
   S.runs = st.runs;
   S.spec = st.spec || "lmfpd@latest";
   $("spec").textContent = S.spec;
-  $("health").className = "dot up";
+  $("health").className = "led led-up";
+  $("health").title = "本地服务已连接";
 
   if (!S.providers.find((p) => p.id === S.selectedId)) S.selectedId = S.providers[0]?.id ?? null;
 
   renderProviders();
   renderModelArea();
   renderHistory();
-  updatePanelState();
+  renderHead();
+  syncRunBtn();
+  if (!S.run) renderIdle();
 
   if (st.activeRunId && !S.run) attachRun(st.activeRunId);
 }
 
-/* ================================================================ 供应商 */
-
 function currentProvider() {
   return S.providers.find((p) => p.id === S.selectedId) ?? null;
 }
+
+/* ================================================================ 供应商 */
 
 function renderProviders() {
   const list = $("provider-list");
@@ -370,34 +387,39 @@ function renderProviders() {
   $("provider-empty").hidden = S.providers.length > 0;
 
   for (const p of S.providers) {
+    const on = p.id === S.selectedId;
     list.append(
       el(
         "li",
         {
-          class: `provider-item${p.id === S.selectedId ? " active" : ""}`,
+          class: `channel${on ? " channel-on" : ""}`,
+          tabindex: "0",
           onclick: (e) => {
             if (e.target.closest(".icon-btn")) return;
-            S.selectedId = p.id;
-            LS.set("fpd.provider", p.id);
-            renderProviders();
-            renderModelArea();
-            updatePanelState();
+            selectProvider(p.id);
+          },
+          onkeydown: (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              selectProvider(p.id);
+            }
           },
         },
         el(
           "div",
-          { class: "pv-top" },
-          el("span", { class: "pv-name", text: p.name }),
+          { class: "channel-top" },
+          el("span", { class: "channel-name", text: p.name }),
           el(
             "div",
-            { class: "pv-actions" },
-            el("button", { class: "icon-btn", title: "编辑", text: "✎", onclick: () => openDialog(p) }),
+            { class: "channel-acts" },
+            el("button", { class: "icon-btn", type: "button", text: "编辑", onclick: () => openDialog(p) }),
             el("button", {
               class: "icon-btn",
-              title: "删除",
-              text: "✕",
-              onclick: async () => {
-                if (!confirm(`删除供应商「${p.name}」？历史记录会保留。`)) return;
+              type: "button",
+              text: "删除",
+              onclick: async (e) => {
+                e.stopPropagation();
+                if (!confirm(`删除供应商「${p.name}」？运行记录会保留。`)) return;
                 await api(`/api/providers/${p.id}`, { method: "DELETE" });
                 if (S.selectedId === p.id) S.selectedId = null;
                 await refresh();
@@ -405,14 +427,26 @@ function renderProviders() {
             }),
           ),
         ),
-        el("div", { class: "pv-host", text: hostOf(p.baseUrl) }),
-        el("div", {
-          class: "pv-key",
-          text: `${p.keyMasked}${p.models.length ? ` · ${p.models.length} 个模型` : ""}`,
-        }),
+        el("div", { class: "channel-host", text: hostOf(p.baseUrl) }),
+        el(
+          "div",
+          { class: "channel-foot" },
+          el("span", { class: "channel-key", text: p.keyMasked }),
+          p.models.length ? el("span", { text: `${p.models.length} 个模型` }) : null,
+        ),
       ),
     );
   }
+}
+
+function selectProvider(id) {
+  S.selectedId = id;
+  LS.set("fpd.provider", id);
+  renderProviders();
+  renderModelArea();
+  renderHead();
+  syncRunBtn();
+  if (!S.run) renderIdle();
 }
 
 function openDialog(provider = null) {
@@ -422,9 +456,9 @@ function openDialog(provider = null) {
   $("pv-baseurl").value = provider?.baseUrl ?? "";
   $("pv-apikey").value = "";
   $("pv-apikey").placeholder = provider ? "留空则不修改" : "sk-...";
-  $("pv-keyhint").textContent = provider ? `当前：${provider.keyMasked}` : "";
+  $("pv-keyhint").textContent = provider ? `当前 ${provider.keyMasked}` : "";
   $("provider-dialog").showModal();
-  setTimeout(() => $("pv-baseurl").focus(), 30);
+  setTimeout(() => ($("pv-name").value ? $("pv-baseurl").focus() : $("pv-name").focus()), 30);
 }
 
 async function saveProvider() {
@@ -444,7 +478,7 @@ async function saveProvider() {
     }
     $("provider-dialog").close();
     await refresh();
-    toast("已保存", "good");
+    toast("已保存", "ok");
   } catch (err) {
     toast(err.message, "bad");
   }
@@ -470,19 +504,100 @@ function renderModelArea() {
 
   const chips = $("model-chips");
   chips.replaceChildren();
-  const recent = recentModels().slice(0, 6);
+  const recent = recentModels().slice(0, 5);
   for (const m of recent) {
-    chips.append(el("button", { class: "chip", text: m, onclick: () => { $("model").value = m; updateCmd(); } }));
+    chips.append(
+      el("button", {
+        class: "chip",
+        type: "button",
+        text: m,
+        onclick: () => {
+          $("model").value = m;
+          LS.set("fpd.model", m);
+          updateCmd();
+        },
+      }),
+    );
   }
-  if (!recent.length) chips.append(el("span", { class: "hint-inline", text: "点「拉取模型」从 /models 取列表" }));
+  if (!recent.length) chips.append(el("span", { class: "chip-hint", text: "最近测过的模型会留在这里" }));
 }
 
-function updatePanelState() {
+/* ================================================================ 眉板 */
+
+function statusOf(run) {
+  if (!run) return { text: "待机", led: "led-idle" };
+  const running = run.status === "queued" || run.status === "running";
+  if (running) return { text: STATUS_TEXT[run.status], led: "led-run" };
+  if (run.status === "cancelled") return { text: "已取消", led: "led-idle" };
+  if (run.status === "error") {
+    if (run.exitCode === 1) return { text: "未评分", led: "led-warn" };
+    return { text: "失败", led: "led-bad" };
+  }
+  if (run.exitCode === 0) return { text: "已完成", led: "led-ok" };
+  if (run.exitCode === 1) return { text: "未评分", led: "led-warn" };
+  return { text: "已完成", led: "led-ok" };
+}
+
+function renderHead() {
+  const host = $("run-head");
+  if (!host) return;
+  const run = S.run;
+  const st = statusOf(run);
+  const live = run && (run.status === "queued" || run.status === "running");
+  const cols = run?.options?.cols ?? (Number($("opt-cols").value) || 110);
+
+  const bits = [
+    el("span", { class: `led ${st.led}` }),
+    el("span", {
+      class: `scope-state${live ? " is-live" : run && run.status === "error" ? " is-bad" : ""}`,
+      text: st.text,
+    }),
+  ];
+
+  if (!run) {
+    const p = currentProvider();
+    bits.push(el("span", { class: "scope-sep" }));
+    if (p) {
+      bits.push(el("span", { class: "scope-target", text: p.name }));
+      bits.push(el("span", { class: "scope-sep" }));
+      bits.push(el("span", { class: "scope-target", text: hostOf(p.baseUrl) }));
+    } else {
+      bits.push(el("span", { class: "scope-target", text: "未选择供应商" }));
+    }
+    bits.push(el("span", { class: "scope-push" }));
+    bits.push(el("span", { class: "scope-read", text: `${cols} 列` }));
+  } else {
+    bits.push(el("span", { class: "scope-sep" }));
+    bits.push(el("span", { class: "scope-read", text: run.model }));
+    bits.push(el("span", { class: "scope-sep" }));
+    bits.push(el("span", { class: "scope-read", text: durationOf(run) }));
+    bits.push(el("span", { class: "scope-sep" }));
+    bits.push(el("span", { class: "scope-read", text: run.exitCode != null ? `exit ${run.exitCode}` : "exit —" }));
+    bits.push(el("span", { class: "scope-push" }));
+    bits.push(el("span", { class: "scope-read", text: `${cols} 列` }));
+    if (live) {
+      bits.push(
+        el("button", {
+          class: "btn btn-quiet btn-xs btn-stop",
+          type: "button",
+          text: "取消",
+          onclick: async () => {
+            await api(`/api/runs/${run.id}/cancel`, { method: "POST" });
+            toast("已请求取消", "info");
+          },
+        }),
+      );
+    }
+  }
+
+  host.replaceChildren(...bits);
+}
+
+function syncRunBtn() {
+  const busy = S.run && (S.run.status === "queued" || S.run.status === "running");
   const p = currentProvider();
-  $("panel-provider").textContent = p ? `${p.name} · ${hostOf(p.baseUrl)}` : "未选择供应商";
-  const busy = S.run && ["queued", "running"].includes(S.run.status);
   $("run-btn").disabled = !p || busy;
-  updateCmd();
+  $("run-btn").textContent = busy ? "检测中…" : "开始检测";
 }
 
 /* ================================================================ 选项 */
@@ -490,8 +605,8 @@ function updatePanelState() {
 function collectOptions() {
   return {
     api: $("opt-api").value,
-    count: Number($("opt-count").value),
-    parallel: Number($("opt-parallel").value),
+    count: Number($("opt-count").value) || 3,
+    parallel: Number($("opt-parallel").value) || 3,
     repeat: Number($("opt-repeat").value) || 1,
     strict: $("opt-strict").checked,
     noStream: $("opt-nostream").checked,
@@ -546,11 +661,44 @@ function commandString() {
     parts.push("--tokenizer");
     if (o.maxProbes !== 20) parts.push(`--max-probes ${o.maxProbes}`);
   }
-  return parts.join(" \\\n  ");
+  return parts.join(" ");
+}
+
+function renderIdle() {
+  const box = $("well-idle");
+  if (!box || box.hidden) return;
+  const p = currentProvider();
+  const o = collectOptions();
+  const model = $("model").value.trim();
+  const rows = [
+    ["供应商", p ? p.name : "未选择"],
+    ["端点", p ? p.baseUrl : "—"],
+    ["模型", model || "未填写"],
+    ["协议", o.api],
+    ["采样", `count ${o.count} / 并发 ${o.parallel} / 轮数 ${o.repeat}`],
+  ];
+  box.replaceChildren(
+    el("p", { class: "idle-title", text: "待机" }),
+    el(
+      "div",
+      { class: "idle-rows" },
+      ...rows.map(([k, v]) =>
+        el("div", { class: "idle-row" }, el("span", { class: "idle-k", text: k }), el("span", { class: "idle-v", text: v })),
+      ),
+    ),
+    el("p", { class: "idle-hint", text: "点「开始检测」后，终端输出会实时出现在这里。" }),
+  );
 }
 
 function updateCmd() {
-  $("cmdline").textContent = commandString();
+  const host = $("cmdline");
+  host.replaceChildren();
+  commandString()
+    .split(" ")
+    .forEach((part, i) => {
+      if (i) host.append(" ");
+      host.append(el("span", { text: part }));
+    });
 }
 
 /* ================================================================ 起跑 */
@@ -562,6 +710,7 @@ async function startRun() {
   if (!model) return toast("填模型名", "bad");
 
   saveOptions();
+  LS.set("fpd.model", model);
   pushRecentModel(model);
   renderModelArea();
 
@@ -584,9 +733,9 @@ async function attachRun(runId) {
   S.stick = true;
   S.term = new Term(run.options?.cols ?? 110);
   S.term.write(run.tui ?? "");
-  renderRunCard();
-  updatePanelState();
-  if (["queued", "running"].includes(run.status)) openStream(runId);
+  renderScope();
+  syncRunBtn();
+  if (run.status === "queued" || run.status === "running") openStream(runId);
 }
 
 function stopStream() {
@@ -621,9 +770,9 @@ function openStream(runId) {
         S.term = new Term(S.run.options?.cols ?? 110);
         S.term.write(msg.tui);
       }
-      renderRunHeader();
+      renderHead();
       schedulePaint();
-      if (!["queued", "running"].includes(msg.status)) finishRun();
+      if (msg.status !== "queued" && msg.status !== "running") finishRun();
     } else if (msg.type === "tui") {
       if (S.loadedRunId !== runId || !S.term) return;
       S.term.write(msg.chunk);
@@ -631,7 +780,7 @@ function openStream(runId) {
     } else if (msg.type === "status") {
       if (S.run) S.run.status = msg.status;
       if (msg.startedAt && S.run) S.run.startedAt = msg.startedAt;
-      renderRunHeader();
+      renderHead();
       startTicker();
     } else if (msg.type === "done") {
       if (!S.run) return;
@@ -652,7 +801,7 @@ function openStream(runId) {
     setTimeout(async () => {
       try {
         const { run } = await api(`/api/runs/${runId}`);
-        if (!["queued", "running"].includes(run.status)) {
+        if (run.status !== "queued" && run.status !== "running") {
           S.run = run;
           finishRun();
         }
@@ -665,129 +814,67 @@ function openStream(runId) {
 
 function finishRun() {
   stopStream();
-  if (S.es) {
-    S.es.close();
-    S.es = null;
-  }
-  renderRunCard();
-  updatePanelState();
+  renderScope();
+  syncRunBtn();
   refresh().catch(() => {});
 }
 
 function startTicker() {
   if (S.timer) return;
   S.timer = setInterval(() => {
-    const e = $("term-elapsed");
-    if (e) e.textContent = elapsedText(S.run);
+    if (S.run) renderHead();
   }, 1000);
 }
 
-function elapsedText(run) {
-  if (!run) return "—";
-  const start = run.startedAt ?? run.createdAt;
-  if (!start) return "—";
-  const end = run.finishedAt ?? Date.now();
-  return fmtDur(end - start);
-}
+/* ================================================================ 屏幕区 */
 
-/* ================================================================ 结果卡片 */
-
-function renderRunCard() {
-  const section = $("result-section");
+function renderScope() {
   const run = S.run;
+  const idle = $("well-idle");
+  const body = $("term-body");
+  const foot = $("run-actions");
+
   if (!run) {
-    section.hidden = true;
+    $("scope").style.setProperty("--cols", String(Number($("opt-cols").value) || 110));
+    idle.hidden = false;
+    renderIdle();
+    body.textContent = "";
+    foot.hidden = true;
+    foot.replaceChildren();
+    renderHead();
     return;
   }
-  section.hidden = false;
 
-  const card = $("result-card");
-  card.replaceChildren();
-  card.append(el("div", { id: "run-head" }));
-  card.append(
-    el(
-      "div",
-      { class: "cmd-echo", title: "这条命令由服务端执行，key 通过环境变量注入" },
-      el("span", { class: "prompt", text: "$ " }),
-      el("span", { text: commandForRun(run) }),
-    ),
-  );
-
-  const body = el("pre", { class: "term-body", id: "term-body" });
-  const box = el(
-    "div",
-    { class: "term-box" },
-    el(
-      "div",
-      { class: "term-bar" },
-      el("span", { class: "dots" }, el("i", {}), el("i", {}), el("i", {})),
-      el("span", { class: "term-title", text: `fpd · ${run.options?.cols ?? 110} cols` }),
-      el("span", { class: "term-hint", text: "PTY 实时输出 · ANSI 高亮" }),
-    ),
-    body,
-  );
-  card.append(box);
-
-  card.append(
-    el(
-      "div",
-      { class: "run-actions", id: "run-actions" },
-      el("button", { class: "btn btn-ghost btn-sm", id: "rerun-btn", text: "再测一次", onclick: rerun }),
-      el("button", {
-        class: "btn btn-ghost btn-sm",
-        text: "查看原始报告 JSON",
-        id: "report-btn",
-        onclick: () => showReport(run.id),
-      }),
-      el("button", { class: "btn btn-ghost btn-sm", text: "复制命令", onclick: copyRunCommand }),
-    ),
-  );
-
-  body.parentElement.addEventListener("scroll", () => {
-    const b = body.parentElement;
-    S.stick = b.scrollHeight - b.scrollTop - b.clientHeight < 48;
-  });
-
-  renderRunHeader();
+  idle.hidden = true;
+  foot.hidden = false;
+  $("scope").style.setProperty("--cols", String(run.options?.cols ?? 110));
+  renderHead();
+  renderFoot(run);
   paint(body, S.term);
   startTicker();
 }
 
-function renderRunHeader() {
-  const host = $("run-head");
-  if (!host) return;
-  const run = S.run;
-  const running = ["queued", "running"].includes(run.status);
-  const pillCls =
-    run.status === "done" ? "pill-good" : run.status === "error" ? "pill-bad" : run.status === "cancelled" ? "pill-warn" : "pill-muted";
-  const label = { queued: "排队中", running: "检测中", done: "已完成", error: "失败", cancelled: "已取消" }[run.status] ?? run.status;
+function renderFoot(run) {
+  const foot = $("run-actions");
+  const running = run.status === "queued" || run.status === "running";
 
-  host.replaceChildren(
-    running ? el("div", { class: "spinner" }) : el("div", { class: `status-dot ${pillCls}` }),
-    el("h2", { text: "检测输出" }),
-    el("span", { class: `pill ${pillCls}`, text: label }),
-    el("span", { class: "pill", text: run.model }),
-    el("span", { class: "pill pill-muted", text: `${run.providerName} · ${hostOf(run.baseUrl)}` }),
-    el("span", { class: "pill pill-muted", id: "term-elapsed", text: `用时 ${elapsedText(run)}` }),
-    run.exitCode != null ? el("span", { class: "pill pill-muted", text: `exit ${run.exitCode}` }) : null,
-    running
-      ? el("button", {
-          class: "btn btn-danger btn-sm",
-          text: "取消",
-          style: "margin-left:auto",
-          onclick: async () => {
-            await api(`/api/runs/${run.id}/cancel`, { method: "POST" });
-            toast("已发送 SIGTERM", "warn");
-          },
-        })
-      : el("span", { style: "margin-left:auto" }),
-  );
-
-  const reportBtn = $("report-btn");
-  if (reportBtn) {
-    reportBtn.disabled = !run.hasReport;
-    reportBtn.title = run.hasReport ? "打开这次运行的原始报告（不解析，原样查看）" : "这次没有保存报告";
-  }
+  const kids = [
+    el("button", { class: "btn btn-quiet btn-xs", type: "button", text: "再测一次", onclick: rerun, disabled: running }),
+    el(
+      "button",
+      {
+        class: "btn btn-quiet btn-xs",
+        type: "button",
+        text: "查看报告",
+        disabled: !run.hasReport,
+        title: run.hasReport ? "打开这次运行的原始报告，不解析" : "这次没有保存报告",
+        onclick: () => showReport(run.id),
+      },
+    ),
+    el("button", { class: "btn btn-quiet btn-xs", type: "button", text: "复制命令", onclick: copyRunCommand }),
+  ];
+  if (run.error) kids.push(el("span", { class: "foot-note", text: run.error, title: run.error }));
+  foot.replaceChildren(...kids.filter(Boolean));
 }
 
 function commandForRun(run) {
@@ -811,6 +898,7 @@ async function rerun() {
   S.selectedId = p.id;
   renderProviders();
   renderModelArea();
+  updateCmd();
   startRun();
 }
 
@@ -818,7 +906,7 @@ async function copyRunCommand() {
   if (!S.run) return;
   try {
     await navigator.clipboard.writeText(commandForRun(S.run).replace("-k ••••••", "-k sk-xxx"));
-    toast("命令已复制", "good");
+    toast("命令已复制", "ok");
   } catch {
     toast("复制失败", "bad");
   }
@@ -826,7 +914,7 @@ async function copyRunCommand() {
 
 async function showReport(runId) {
   const res = await fetch(`/api/runs/${runId}/report`);
-  if (!res.ok) return toast("这次运行没有保存报告", "warn");
+  if (!res.ok) return toast("这次运行没有保存报告", "info");
   const text = await res.text();
   const dlg = el(
     "dialog",
@@ -836,9 +924,9 @@ async function showReport(runId) {
       { class: "dialog-body" },
       el(
         "div",
-        { class: "card-head" },
-        el("h2", { text: "原始报告 JSON" }),
-        el("button", { class: "btn btn-ghost btn-sm", text: "关闭", onclick: () => dlg.close() }),
+        { class: "report-bar" },
+        el("div", {}, el("h2", { text: "原始报告" }), el("p", { text: `runs/${runId}.report.json` })),
+        el("button", { class: "btn btn-quiet btn-xs", type: "button", text: "关闭", onclick: () => dlg.close() }),
       ),
       el("pre", { class: "raw-json", text }),
     ),
@@ -848,39 +936,57 @@ async function showReport(runId) {
   dlg.showModal();
 }
 
-/* ================================================================ 历史 */
+/* ================================================================ 台账 */
 
 function renderHistory() {
   const box = $("history");
   box.replaceChildren();
   $("history-count").textContent = String(S.runs.length);
+
   if (!S.runs.length) {
-    box.append(el("div", { class: "empty", text: "还没有运行记录。跑一次检测就会出现在这里。" }));
+    box.append(el("p", { class: "empty", text: "还没有运行记录。跑一次检测就会出现在这里。" }));
     return;
   }
+
+  box.append(
+    el(
+      "div",
+      { class: "ledger-head" },
+      el("span", { text: "模型" }),
+      el("span", { text: "供应商" }),
+      el("span", { class: "ledger-time", text: "开始" }),
+      el("span", { class: "ledger-num", text: "用时" }),
+      el("span", { class: "ledger-num", text: "退出码" }),
+      el("span", { text: "状态" }),
+    ),
+  );
+
   for (const r of S.runs) {
-    const pillCls =
-      r.status === "done" ? "pill-good" : r.status === "error" ? "pill-bad" : r.status === "cancelled" ? "pill-warn" : "pill-muted";
+    const st = statusOf(r);
     box.append(
       el(
         "div",
         {
-          class: `history-row${r.id === S.run?.id ? " active" : ""}`,
+          class: `ledger-row${r.id === S.run?.id ? " is-open" : ""}`,
+          tabindex: "0",
           onclick: () => {
             history.replaceState(null, "", `?run=${r.id}`);
             attachRun(r.id);
             window.scrollTo({ top: 0, behavior: "smooth" });
           },
+          onkeydown: (e) => {
+            if (e.key === "Enter") {
+              history.replaceState(null, "", `?run=${r.id}`);
+              attachRun(r.id);
+            }
+          },
         },
-        el(
-          "div",
-          {},
-          el("div", { class: "history-model", text: r.model }),
-          el("div", { class: "history-sub", text: `${r.providerName} · ${fmtTime(r.createdAt)}` }),
-        ),
-        el("span", { class: "history-sub", text: r.exitCode != null ? `exit ${r.exitCode}` : "—" }),
-        el("span", { class: `pill ${pillCls}`, text: r.status }),
-        el("span", { class: "history-sub", text: fmtTime(r.finishedAt) }),
+        el("span", { class: "ledger-model", text: r.model }),
+        el("span", { class: "ledger-sub ledger-provider", text: r.providerName }),
+        el("span", { class: "ledger-sub ledger-time", text: fmtTime(r.createdAt) }),
+        el("span", { class: "ledger-num", text: durationOf(r) }),
+        el("span", { class: "ledger-num", text: r.exitCode != null ? String(r.exitCode) : "—" }),
+        el("span", { class: "ledger-status" }, el("span", { class: `led ${st.led}` }), st.text),
       ),
     );
   }
@@ -896,14 +1002,17 @@ function bind() {
     saveProvider();
   });
 
-  $("model").addEventListener("input", updateCmd);
+  $("model").addEventListener("input", () => {
+    updateCmd();
+    if (!S.run) renderIdle();
+  });
   $("model").addEventListener("change", () => LS.set("fpd.model", $("model").value));
   $("run-btn").addEventListener("click", startRun);
 
   $("copy-cmd").addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText(commandString().replace(/ \\\n\s+/g, " "));
-      toast("命令已复制（key 用 sk-xxx 占位）", "good");
+      await navigator.clipboard.writeText(commandString());
+      toast("命令已复制，key 用 sk-xxx 占位", "ok");
     } catch {
       toast("复制失败", "bad");
     }
@@ -914,47 +1023,49 @@ function bind() {
     if (!p) return toast("先选供应商", "bad");
     const btn = $("fetch-models");
     btn.disabled = true;
-    btn.textContent = "拉取中…";
+    btn.textContent = "获取中";
     try {
       const { models, fetched } = await api(`/api/providers/${p.id}/models`, { method: "POST" });
       await refresh();
-      toast(fetched ? `拉到 ${fetched} 个模型` : "接口没返回模型列表", fetched ? "good" : "warn");
+      toast(fetched ? `拿到 ${fetched} 个模型` : "接口没返回模型列表", fetched ? "ok" : "info");
       if (models.length === 1) $("model").value = models[0];
       updateCmd();
     } catch (err) {
       toast(err.message, "bad");
     } finally {
       btn.disabled = false;
-      btn.textContent = "拉取模型";
+      btn.textContent = "获取列表";
     }
   });
 
+  const onChange = () => {
+    if (!S.run) renderIdle();
+  };
   for (const id of [
-    "opt-api",
-    "opt-count",
-    "opt-parallel",
-    "opt-repeat",
-    "opt-timeout",
-    "opt-effort",
-    "opt-tier",
-    "opt-strict",
-    "opt-nostream",
-    "opt-tokenizer",
-    "opt-maxprobes",
-    "opt-cols",
+    "opt-api", "opt-count", "opt-parallel", "opt-repeat", "opt-timeout",
+    "opt-effort", "opt-tier", "opt-strict", "opt-nostream", "opt-tokenizer",
+    "opt-maxprobes", "opt-cols",
   ]) {
     $(id).addEventListener("change", () => {
       saveOptions();
       updateCmd();
+      renderHead();
+      onChange();
     });
   }
 
   $("opt-strict").addEventListener("change", () => {
     if ($("opt-strict").checked && $("opt-count").value !== "3") {
       $("opt-count").value = "3";
-      toast("strict 模式已强制 count=3", "warn");
+      toast("严格模式固定 count=3", "info");
       saveOptions();
+      updateCmd();
     }
+  });
+
+  const well = $("well");
+  well.addEventListener("scroll", () => {
+    S.stick = well.scrollHeight - well.scrollTop - well.clientHeight < 48;
   });
 
   document.addEventListener("keydown", (e) => {
@@ -969,11 +1080,14 @@ function bind() {
   restoreOptions();
   $("model").value = LS.get("fpd.model", "");
   updateCmd();
+  renderHead();
+  renderScope();
 
   try {
     await refresh();
   } catch (err) {
-    $("health").className = "dot down";
+    $("health").className = "led led-down";
+    $("health").title = "本地服务未连接";
     toast(`连不上本地服务：${err.message}`, "bad");
   }
 
@@ -982,16 +1096,14 @@ function bind() {
     try {
       await attachRun(deepRun);
       const p = S.providers.find((x) => x.id === S.run?.providerId);
-      if (p) {
-        S.selectedId = p.id;
-        renderProviders();
-        renderModelArea();
-      }
+      if (p) selectProvider(p.id);
       if (!$("model").value && S.run) {
         $("model").value = S.run.model;
         updateCmd();
       }
-    } catch {}
+    } catch {
+      toast("找不到这条运行记录", "bad");
+    }
   }
 
   setInterval(() => {
