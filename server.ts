@@ -82,7 +82,8 @@ type RunRecord = {
 async function readProviders(): Promise<Provider[]> {
   try {
     const parsed = JSON.parse(await readFile(PROVIDERS_FILE, "utf8"));
-    return Array.isArray(parsed) ? parsed : [];
+    const list: Provider[] = Array.isArray(parsed) ? parsed : [];
+    return list.map((p) => ({ ...p, baseUrl: normalizeBaseUrl(p.baseUrl ?? "") }));
   } catch {
     return [];
   }
@@ -114,6 +115,24 @@ function publicProvider(p: Provider) {
 }
 
 // ---------------------------------------------------------------- 模型列表
+
+// 收敛成标准格式：去掉尾部斜杠；路径里没有版本段时补 /v1
+function normalizeBaseUrl(raw: string): string {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (!s) return s;
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return s.replace(/\/+$/, "");
+  }
+  // 注意先算完再赋值：给 pathname 赋空串会被 URL 规范回 "/"，直接 += 会拼出 //v1
+  let path = u.pathname.replace(/\/+$/, "");
+  // 已有 /v1、/v1beta、/v2 这类版本段就原样保留
+  if (!/\/v\d+[a-z0-9]*/i.test(path)) path += "/v1";
+  u.pathname = path;
+  return u.toString();
+}
 
 function modelsUrl(baseUrl: string) {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
@@ -493,7 +512,7 @@ async function route(req: Request, url: URL): Promise<Response> {
     const provider: Provider = {
       id: randomUUID(),
       name: name || new URL(baseUrl).host,
-      baseUrl,
+      baseUrl: normalizeBaseUrl(baseUrl),
       apiKey,
       models: [],
       createdAt: Date.now(),
@@ -516,7 +535,7 @@ async function route(req: Request, url: URL): Promise<Response> {
       if (typeof body.name === "string" && body.name.trim()) p.name = body.name.trim();
       if (typeof body.baseUrl === "string" && body.baseUrl.trim()) {
         if (!/^https?:\/\//i.test(body.baseUrl.trim())) return json({ error: "base url 格式不对" }, 400);
-        p.baseUrl = body.baseUrl.trim();
+        p.baseUrl = normalizeBaseUrl(body.baseUrl);
       }
       if (typeof body.apiKey === "string" && body.apiKey.trim()) p.apiKey = body.apiKey.trim();
       p.updatedAt = Date.now();

@@ -3,7 +3,7 @@
 把这条命令变成一个界面：
 
 ```sh
-bunx lmfpd@latest -b https://aihub.dog/v1 -k sk-123 -m gpt-6.1-sol
+bunx lmfpd@latest -b https://api.openai.com/v1 -k sk-123 -m gpt-6.1-sol
 ```
 
 界面上的顺序是：选供应商、选模型、开始检测、看终端输出。
